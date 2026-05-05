@@ -1,62 +1,92 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 from scapy.layers.inet import IP, TCP, UDP
 from scapy.utils import PcapReader
 
 
-def extract_features(pcap_path: str, window_s: int = 1) -> pd.DataFrame:
-    buckets: Dict[int, Dict[str, object]] = {}
+FEATURE_COLUMNS = [
+    "packets_per_sec",
+    "bytes_per_sec",
+    "syn_per_sec",
+    "unique_dst_ports",
+    "unique_dst_ips",
+]
 
-    start_time = None
+
+def _empty_window_rows(total_windows: int) -> List[Dict[str, float]]:
+    return [
+        {
+            "window_start": window_start,
+            "packets_per_sec": 0.0,
+            "bytes_per_sec": 0.0,
+            "syn_per_sec": 0.0,
+            "unique_dst_ports": 0.0,
+            "unique_dst_ips": 0.0,
+        }
+        for window_start in range(total_windows)
+    ]
+
+
+def extract_features(
+    pcap_path: str,
+    window_s: int = 1,
+    total_windows: Optional[int] = None,
+) -> pd.DataFrame:
+    buckets: Dict[int, Dict[str, object]] = {}
+    min_timestamp = None
+
     with PcapReader(pcap_path) as reader:
         for pkt in reader:
             if IP not in pkt:
                 continue
-            if start_time is None:
-                start_time = pkt.time
-            window_index = int((pkt.time - start_time) // window_s)
+
+            pkt_timestamp = float(pkt.time)
+            if min_timestamp is None:
+                min_timestamp = int(pkt_timestamp)
+
+            window_index = int(pkt_timestamp) - min_timestamp
+            if total_windows is not None and (window_index < 0 or window_index >= total_windows):
+                continue
+
             if window_index not in buckets:
                 buckets[window_index] = {
-                    "window_start": window_index * window_s,
+                    "window_start": window_index,
                     "packets": 0,
                     "bytes": 0,
                     "syn": 0,
                     "dst_ports": set(),
                     "dst_ips": set(),
                 }
-            b = buckets[window_index]
-            b["packets"] += 1
-            b["bytes"] += len(pkt)
+
+            bucket = buckets[window_index]
+            bucket["packets"] += 1
+            bucket["bytes"] += len(pkt)
 
             if TCP in pkt:
-                if pkt[TCP].flags & 0x02:  # SYN
-                    b["syn"] += 1
-                b["dst_ports"].add(int(pkt[TCP].dport))
+                if pkt[TCP].flags & 0x02:
+                    bucket["syn"] += 1
+                bucket["dst_ports"].add(int(pkt[TCP].dport))
             elif UDP in pkt:
-                b["dst_ports"].add(int(pkt[UDP].dport))
-            b["dst_ips"].add(pkt[IP].dst)
+                bucket["dst_ports"].add(int(pkt[UDP].dport))
 
-    if not buckets:
-        return pd.DataFrame(columns=[
-            "window_start",
-            "packets_per_sec",
-            "bytes_per_sec",
-            "syn_per_sec",
-            "unique_dst_ports",
-            "unique_dst_ips",
-        ])
+            bucket["dst_ips"].add(pkt[IP].dst)
 
-    rows: List[Dict[str, object]] = []
-    for window_index in sorted(buckets.keys()):
-        b = buckets[window_index]
-        rows.append({
-            "window_start": b["window_start"],
-            "packets_per_sec": b["packets"] / window_s,
-            "bytes_per_sec": b["bytes"] / window_s,
-            "syn_per_sec": b["syn"] / window_s,
-            "unique_dst_ports": len(b["dst_ports"]),
-            "unique_dst_ips": len(b["dst_ips"]),
-        })
+    if not buckets and total_windows is None:
+        return pd.DataFrame(columns=["window_start", *FEATURE_COLUMNS])
+
+    if total_windows is None:
+        total_windows = max(buckets.keys(), default=-1) + 1
+
+    rows = _empty_window_rows(total_windows)
+    for window_index, bucket in buckets.items():
+        rows[window_index] = {
+            "window_start": bucket["window_start"],
+            "packets_per_sec": bucket["packets"] / window_s,
+            "bytes_per_sec": bucket["bytes"] / window_s,
+            "syn_per_sec": bucket["syn"] / window_s,
+            "unique_dst_ports": float(len(bucket["dst_ports"])),
+            "unique_dst_ips": float(len(bucket["dst_ips"])),
+        }
 
     return pd.DataFrame(rows)

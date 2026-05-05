@@ -79,13 +79,12 @@ def generate_pcap(
 
     random.seed(seed)
 
-    total_seconds = sum(p.duration_s for p in phases)
     labels: List[Tuple[int, int, str]] = []
 
-    base_time = time.time()
+    base_time = int(time.time())
     current_second = 0
 
-    writer = PcapWriter(output_pcap, append=False, sync=True)
+    writer = PcapWriter(output_pcap, append=False, sync=False)
     try:
         for phase in phases:
             for _ in range(phase.duration_s):

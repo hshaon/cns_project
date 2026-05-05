@@ -1,15 +1,15 @@
-# IoT DoS Detection (Adaptive Thresholds)
+# IoT DoS Detection (Progress Report 2)
 
-This project generates synthetic IoT traffic (normal + benign burst + UDP flood + SYN flood),
-extracts simple per-second features, detects anomalies with adaptive thresholds, and evaluates
-performance including a threshold sweep.
+This project generates synthetic IoT traffic, extracts per-second features, compares rule-based
+detectors, and produces report-ready experiment outputs for Progress Report 2.
 
 ## Pipeline
-1. Generate PCAP + ground-truth labels
-2. Extract features per 1s window
-3. Detect using rolling baseline thresholds
-4. Simulate mitigation (log actions)
-5. Evaluate metrics and plot time series + ROC-like sweep
+1. Generate labeled traffic with normal, benign burst, UDP flood, and SYN flood phases.
+2. Extract aligned per-second features, including zero-traffic windows.
+3. Detect anomalies with either adaptive or fixed thresholds.
+4. Compare detector modes across multiple seeds.
+5. Run feature ablation experiments.
+6. Produce metrics, phase summaries, and report figures.
 
 ## Quick Start
 ```bash
@@ -17,18 +17,39 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
 
-python main.py --generate --sweep
+python main.py --generate --sweep --run-experiments
 ```
 
-## Outputs
+## Key CLI Options
+- `--detector-mode adaptive|fixed`
+- `--rule-mode protocol|kofn`
+- `--calibration-seconds 60`
+- `--run-experiments`
+- `--seeds 10`
+- `--experiment-detector-modes adaptive,fixed`
+- `--ablation-detector-mode adaptive`
+
+## Main Outputs
 - `results/features.csv`
 - `results/detections.csv`
 - `results/labels.csv`
+- `results/thresholds.csv`
 - `results/metrics.txt`
-- `results/mitigation.log`
+- `results/per_run_metrics.csv`
+- `results/summary_metrics.csv`
+- `results/phase_metrics.csv`
+- `results/ablation_metrics.csv`
+
+## Figures
 - `results/timeseries.png`
-- `results/roc_like.png` (if `--sweep`)
+- `results/roc_like.png`
+- `results/detector_comparison.png`
+- `results/phase_metrics.png`
+- `results/multi_seed_summary.png`
+- `results/ablation_comparison.png`
 
 ## Notes
-- Adaptive thresholds use the last `baseline_window` seconds.
-- The benign firmware burst is labeled as normal to test false positives.
+- The canonical timeline comes from `labels.csv`, so `labels.csv`, `features.csv`, and `detections.csv`
+  are aligned row-for-row.
+- The default detector comparison uses `adaptive` and `fixed` threshold modes with the `protocol` rule.
+- The benign firmware burst remains labeled as normal so false positives are visible in evaluation.
