@@ -6,13 +6,15 @@ import numpy as np
 import pandas as pd
 
 from detector import FEATURES, detect
-from evaluator import aggregate_metrics, evaluate, phase_metrics, sweep_thresholds
+from evaluator import aggregate_metrics, metrics_with_phase_context, phase_metrics, sweep_thresholds
 from feature_extractor import FEATURE_COLUMNS, extract_features
 from mitigation import simulate_mitigation
 from traffic_generator import generate_pcap
 from visualizer import (
     plot_ablation_comparison,
     plot_detector_comparison,
+    plot_final_phase_breakdown,
+    plot_final_tradeoff_bars,
     plot_multi_seed_summary,
     plot_phase_metrics,
     plot_roc,
@@ -63,6 +65,36 @@ def _dataset_for_seed(args: argparse.Namespace, seed: int, pcap_path: str, label
     return _build_merged_features(labels_path, pcap_path, args.window)
 
 
+def _config_name(detector_mode: str, rule_mode: str, min_alert_windows: int, cooldown_windows: int) -> str:
+    if detector_mode == "hybrid" and min_alert_windows > 1:
+        return "hybrid_persistent"
+    return detector_mode
+
+
+def _detect_dataset(
+    dataset: pd.DataFrame,
+    detector_mode: str,
+    rule_mode: str,
+    feature_subset: Sequence[str],
+    args: argparse.Namespace,
+    min_alert_windows: int,
+    cooldown_windows: int,
+):
+    return detect(
+        dataset,
+        detector_mode=detector_mode,
+        rule_mode=rule_mode,
+        threshold_mult=args.threshold_mult,
+        baseline_window=args.baseline_window,
+        min_baseline=args.min_baseline,
+        calibration_seconds=args.calibration_seconds,
+        feature_subset=feature_subset,
+        kofn_k=args.kofn_k,
+        min_alert_windows=min_alert_windows,
+        cooldown_windows=cooldown_windows,
+    )
+
+
 def run_single_pipeline(
     args: argparse.Namespace,
     seed: int,
@@ -73,23 +105,23 @@ def run_single_pipeline(
     pcap_path: str,
     labels_path: str,
     write_outputs: bool,
+    min_alert_windows: int,
+    cooldown_windows: int,
 ) -> Dict[str, object]:
     if args.generate or not os.path.exists(pcap_path) or not os.path.exists(labels_path):
         generate_pcap(pcap_path, labels_path, seed=seed)
 
     merged = _build_merged_features(labels_path, pcap_path, args.window)
-    detections, threshold_frame = detect(
+    detections, threshold_frame = _detect_dataset(
         merged,
-        detector_mode=detector_mode,
-        rule_mode=rule_mode,
-        threshold_mult=args.threshold_mult,
-        baseline_window=args.baseline_window,
-        min_baseline=args.min_baseline,
-        calibration_seconds=args.calibration_seconds,
-        feature_subset=feature_subset,
-        kofn_k=args.kofn_k,
+        detector_mode,
+        rule_mode,
+        feature_subset,
+        args,
+        min_alert_windows,
+        cooldown_windows,
     )
-    metrics = evaluate(detections["prediction"], detections["label"])
+    metrics = metrics_with_phase_context(detections)
     phase_frame = phase_metrics(detections)
 
     if write_outputs:
@@ -115,6 +147,8 @@ def run_single_pipeline(
                 calibration_seconds=args.calibration_seconds,
                 feature_subset=feature_subset,
                 kofn_k=args.kofn_k,
+                min_alert_windows=min_alert_windows,
+                cooldown_windows=cooldown_windows,
             )
             plot_roc(fprs, tprs, os.path.join(args.results_dir, "roc_like.png"), list(mult_vals))
 
@@ -127,6 +161,9 @@ def run_single_pipeline(
         "detector_mode": detector_mode,
         "rule_mode": rule_mode,
         "seed": seed,
+        "config_name": _config_name(detector_mode, rule_mode, min_alert_windows, cooldown_windows),
+        "min_alert_windows": min_alert_windows,
+        "cooldown_windows": cooldown_windows,
     }
 
 
@@ -138,26 +175,58 @@ def _results_record(
     metrics = dict(run_result["metrics"])
     return {
         "seed": run_result["seed"],
+        "config_name": run_result["config_name"],
         "detector_mode": run_result["detector_mode"],
         "rule_mode": run_result["rule_mode"],
         "feature_set": run_result["feature_set_name"],
+        "min_alert_windows": run_result["min_alert_windows"],
+        "cooldown_windows": run_result["cooldown_windows"],
         "threshold_mult": threshold_mult,
         "baseline_window": baseline_window,
         **metrics,
     }
 
 
+def _experiment_configs(args: argparse.Namespace) -> List[Dict[str, object]]:
+    return [
+        {
+            "config_name": "adaptive",
+            "detector_mode": "adaptive",
+            "rule_mode": "protocol",
+            "min_alert_windows": 1,
+            "cooldown_windows": 0,
+        },
+        {
+            "config_name": "fixed",
+            "detector_mode": "fixed",
+            "rule_mode": "protocol",
+            "min_alert_windows": 1,
+            "cooldown_windows": 0,
+        },
+        {
+            "config_name": "hybrid",
+            "detector_mode": "hybrid",
+            "rule_mode": "protocol",
+            "min_alert_windows": 1,
+            "cooldown_windows": 0,
+        },
+        {
+            "config_name": "hybrid_persistent",
+            "detector_mode": "hybrid",
+            "rule_mode": "protocol",
+            "min_alert_windows": max(2, args.min_alert_windows),
+            "cooldown_windows": 0,
+        },
+    ]
+
+
 def run_experiments(args: argparse.Namespace) -> None:
     seeds = _seed_values(args.seed, args.seeds)
-    detector_modes = _parse_csv_list(args.experiment_detector_modes)
-    rule_modes = _parse_csv_list(args.experiment_rule_modes)
+    experiment_configs = _experiment_configs(args)
 
     per_run_records: List[Dict[str, object]] = []
     phase_records: List[pd.DataFrame] = []
     ablation_records: List[Dict[str, object]] = []
-
-    ablation_detector_mode = args.ablation_detector_mode
-    ablation_rule_mode = args.ablation_rule_mode
 
     for seed in seeds:
         dataset = _dataset_for_seed(
@@ -167,82 +236,125 @@ def run_experiments(args: argparse.Namespace) -> None:
             os.path.join(args.results_dir, f"temp_seed_{seed}.labels.csv"),
         )
 
-        for detector_mode in detector_modes:
-            for rule_mode in rule_modes:
-                detections, _ = detect(
-                    dataset,
-                    detector_mode=detector_mode,
-                    rule_mode=rule_mode,
-                    threshold_mult=args.threshold_mult,
-                    baseline_window=args.baseline_window,
-                    min_baseline=args.min_baseline,
-                    calibration_seconds=args.calibration_seconds,
-                    feature_subset=DEFAULT_FEATURE_SETS["full"],
-                    kofn_k=args.kofn_k,
-                )
-                run_result = {
-                    "seed": seed,
-                    "detector_mode": detector_mode,
-                    "rule_mode": rule_mode,
-                    "feature_set_name": "full",
-                    "metrics": evaluate(detections["prediction"], detections["label"]),
-                    "phase_metrics": phase_metrics(detections),
-                }
-                per_run_records.append(_results_record(run_result, args.threshold_mult, args.baseline_window))
-                phase_frame = run_result["phase_metrics"].copy()
-                phase_frame["seed"] = seed
-                phase_frame["detector_mode"] = detector_mode
-                phase_frame["rule_mode"] = rule_mode
-                phase_frame["feature_set"] = "full"
-                phase_records.append(phase_frame)
-
-        for feature_set_name, feature_subset in DEFAULT_FEATURE_SETS.items():
-            detections, _ = detect(
+        for config in experiment_configs:
+            detections, _ = _detect_dataset(
                 dataset,
-                detector_mode=ablation_detector_mode,
-                rule_mode=ablation_rule_mode,
-                threshold_mult=args.threshold_mult,
-                baseline_window=args.baseline_window,
-                min_baseline=args.min_baseline,
-                calibration_seconds=args.calibration_seconds,
-                feature_subset=feature_subset,
-                kofn_k=args.kofn_k,
+                config["detector_mode"],
+                config["rule_mode"],
+                DEFAULT_FEATURE_SETS["full"],
+                args,
+                int(config["min_alert_windows"]),
+                int(config["cooldown_windows"]),
             )
             run_result = {
                 "seed": seed,
-                "detector_mode": ablation_detector_mode,
-                "rule_mode": ablation_rule_mode,
+                "detector_mode": config["detector_mode"],
+                "rule_mode": config["rule_mode"],
+                "feature_set_name": "full",
+                "metrics": metrics_with_phase_context(detections),
+                "phase_metrics": phase_metrics(detections),
+                "config_name": config["config_name"],
+                "min_alert_windows": int(config["min_alert_windows"]),
+                "cooldown_windows": int(config["cooldown_windows"]),
+            }
+            per_run_records.append(_results_record(run_result, args.threshold_mult, args.baseline_window))
+            phase_frame = run_result["phase_metrics"].copy()
+            phase_frame["seed"] = seed
+            phase_frame["config_name"] = config["config_name"]
+            phase_frame["detector_mode"] = config["detector_mode"]
+            phase_frame["rule_mode"] = config["rule_mode"]
+            phase_frame["feature_set"] = "full"
+            phase_frame["min_alert_windows"] = int(config["min_alert_windows"])
+            phase_frame["cooldown_windows"] = int(config["cooldown_windows"])
+            phase_records.append(phase_frame)
+
+        for feature_set_name, feature_subset in DEFAULT_FEATURE_SETS.items():
+            detections, _ = _detect_dataset(
+                dataset,
+                args.ablation_detector_mode,
+                args.ablation_rule_mode,
+                feature_subset,
+                args,
+                args.min_alert_windows,
+                args.cooldown_windows,
+            )
+            run_result = {
+                "seed": seed,
+                "detector_mode": args.ablation_detector_mode,
+                "rule_mode": args.ablation_rule_mode,
                 "feature_set_name": feature_set_name,
-                "metrics": evaluate(detections["prediction"], detections["label"]),
+                "metrics": metrics_with_phase_context(detections),
+                "config_name": _config_name(
+                    args.ablation_detector_mode,
+                    args.ablation_rule_mode,
+                    args.min_alert_windows,
+                    args.cooldown_windows,
+                ),
+                "min_alert_windows": args.min_alert_windows,
+                "cooldown_windows": args.cooldown_windows,
             }
             ablation_records.append(_results_record(run_result, args.threshold_mult, args.baseline_window))
 
     per_run_metrics = pd.DataFrame(per_run_records)
     summary_metrics = aggregate_metrics(
         per_run_metrics,
-        ["detector_mode", "rule_mode", "feature_set", "threshold_mult", "baseline_window"],
+        [
+            "config_name",
+            "detector_mode",
+            "rule_mode",
+            "feature_set",
+            "min_alert_windows",
+            "cooldown_windows",
+            "threshold_mult",
+            "baseline_window",
+        ],
     )
 
     raw_phase_metrics = pd.concat(phase_records, ignore_index=True)
     phase_summary = (
-        raw_phase_metrics.groupby(["detector_mode", "rule_mode", "feature_set", "phase", "phase_kind"])[
-            ["recall", "false_positive_rate", "accuracy", "precision", "f1"]
-        ]
+        raw_phase_metrics.groupby(
+            [
+                "config_name",
+                "detector_mode",
+                "rule_mode",
+                "feature_set",
+                "min_alert_windows",
+                "cooldown_windows",
+                "phase",
+                "phase_kind",
+            ]
+        )[["recall", "false_positive_rate", "accuracy", "precision", "f1"]]
         .mean()
         .reset_index()
     )
 
     ablation_metrics = pd.DataFrame(ablation_records)
+    final_comparison = summary_metrics[summary_metrics["feature_set"] == "full"][
+        [
+            "config_name",
+            "accuracy_mean",
+            "precision_mean",
+            "recall_mean",
+            "false_positive_rate_mean",
+            "f1_mean",
+            "firmware_burst_fpr_mean",
+            "udp_recall_mean",
+            "syn_recall_mean",
+        ]
+    ].sort_values("config_name")
 
     per_run_metrics.to_csv(os.path.join(args.results_dir, "per_run_metrics.csv"), index=False)
     summary_metrics.to_csv(os.path.join(args.results_dir, "summary_metrics.csv"), index=False)
     phase_summary.to_csv(os.path.join(args.results_dir, "phase_metrics.csv"), index=False)
     ablation_metrics.to_csv(os.path.join(args.results_dir, "ablation_metrics.csv"), index=False)
+    final_comparison.to_csv(os.path.join(args.results_dir, "final_comparison.csv"), index=False)
 
     plot_detector_comparison(summary_metrics, os.path.join(args.results_dir, "detector_comparison.png"))
     plot_phase_metrics(phase_summary, os.path.join(args.results_dir, "phase_metrics.png"))
     plot_multi_seed_summary(summary_metrics, os.path.join(args.results_dir, "multi_seed_summary.png"))
     plot_ablation_comparison(ablation_metrics, os.path.join(args.results_dir, "ablation_comparison.png"))
+    plot_final_tradeoff_bars(summary_metrics, os.path.join(args.results_dir, "final_tradeoff_bars.png"))
+    plot_final_phase_breakdown(summary_metrics, os.path.join(args.results_dir, "final_phase_breakdown.png"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -255,16 +367,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-window", type=int, default=30, help="Rolling baseline window in seconds")
     parser.add_argument("--min-baseline", type=int, default=10, help="Minimum baseline windows")
     parser.add_argument("--threshold-mult", type=float, default=3.0, help="Threshold multiplier")
-    parser.add_argument("--detector-mode", default="adaptive", choices=["adaptive", "fixed"], help="Detector mode")
+    parser.add_argument("--detector-mode", default="adaptive", choices=["adaptive", "fixed", "hybrid"], help="Detector mode")
     parser.add_argument("--rule-mode", default="protocol", choices=["protocol", "kofn"], help="Decision rule mode")
     parser.add_argument("--calibration-seconds", type=int, default=60, help="Calibration period for fixed thresholds")
     parser.add_argument("--kofn-k", type=int, default=2, help="Number of threshold hits required for kofn mode")
+    parser.add_argument("--min-alert-windows", type=int, default=1, help="Consecutive windows required before alerting")
+    parser.add_argument("--cooldown-windows", type=int, default=0, help="Windows to keep alert active after signal drops")
     parser.add_argument("--seed", type=int, default=1337, help="Base random seed")
     parser.add_argument("--run-experiments", action="store_true", help="Run multi-seed comparison experiments")
     parser.add_argument("--seeds", type=int, default=10, help="Number of sequential seeds to evaluate")
-    parser.add_argument("--experiment-detector-modes", default="adaptive,fixed", help="Detector modes for experiments")
-    parser.add_argument("--experiment-rule-modes", default="protocol", help="Rule modes for experiments")
-    parser.add_argument("--ablation-detector-mode", default="adaptive", choices=["adaptive", "fixed"], help="Detector mode for ablation experiments")
+    parser.add_argument("--ablation-detector-mode", default="adaptive", choices=["adaptive", "fixed", "hybrid"], help="Detector mode for ablation experiments")
     parser.add_argument("--ablation-rule-mode", default="protocol", choices=["protocol", "kofn"], help="Rule mode for ablation experiments")
     parser.add_argument("--sweep", action="store_true", help="Run threshold sweep for the primary single run")
     parser.add_argument("--sweep-min", type=float, default=1.0, help="Sweep min multiplier")
@@ -289,6 +401,8 @@ def main() -> None:
         pcap_path=args.pcap,
         labels_path=args.labels,
         write_outputs=True,
+        min_alert_windows=args.min_alert_windows,
+        cooldown_windows=args.cooldown_windows,
     )
 
     if args.run_experiments:

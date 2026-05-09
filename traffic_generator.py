@@ -1,7 +1,7 @@
 import random
 import time
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from scapy.layers.inet import IP, UDP, TCP
 from scapy.packet import Packet
@@ -27,7 +27,13 @@ DEFAULT_PHASES = [
 ]
 
 
-def _packets_for_second(profile: str, src_ip: str, dst_ip: str, second_index: int) -> List[Packet]:
+def _packets_for_second(
+    profile: str,
+    src_ip: str,
+    dst_ip: str,
+    second_index: int,
+    profile_params: Dict[str, float],
+) -> List[Packet]:
     packets: List[Packet] = []
 
     # Keep the normal traffic low-rate and small.
@@ -40,10 +46,15 @@ def _packets_for_second(profile: str, src_ip: str, dst_ip: str, second_index: in
 
     # Firmware update burst: more packets and larger payloads, still benign.
     elif profile == "burst":
-        count = random.randint(20, 40)
+        burst_scale = float(profile_params.get("burst_scale", 1.0))
+        count_low = max(12, int(20 * burst_scale))
+        count_high = max(count_low + 1, int(40 * burst_scale))
+        payload_low = max(250, int(400 * burst_scale))
+        payload_high = max(payload_low + 1, int(900 * burst_scale))
+        count = random.randint(count_low, count_high)
         for _ in range(count):
             dport = 443
-            payload = bytes([0x99]) * random.randint(400, 900)
+            payload = bytes([0x99]) * random.randint(payload_low, payload_high)
             packets.append(IP(src=src_ip, dst=dst_ip) / UDP(dport=dport, sport=random.randint(20000, 60000)) / payload)
 
     elif profile == "udp_flood":
@@ -80,6 +91,7 @@ def generate_pcap(
     random.seed(seed)
 
     labels: List[Tuple[int, int, str]] = []
+    profile_params = {"burst_scale": random.uniform(0.85, 1.15)}
 
     base_time = int(time.time())
     current_second = 0
@@ -89,7 +101,7 @@ def generate_pcap(
         for phase in phases:
             for _ in range(phase.duration_s):
                 labels.append((current_second, phase.label, phase.name))
-                packets = _packets_for_second(phase.profile, src_ip, dst_ip, current_second)
+                packets = _packets_for_second(phase.profile, src_ip, dst_ip, current_second, profile_params)
                 for pkt in packets:
                     pkt.time = base_time + current_second + random.random()
                     writer.write(pkt)

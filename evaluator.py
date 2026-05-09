@@ -56,8 +56,27 @@ def phase_metrics(detections: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def metrics_with_phase_context(detections: pd.DataFrame) -> Dict[str, float]:
+    metrics = evaluate(detections["prediction"], detections["label"])
+    phase_frame = phase_metrics(detections).set_index("phase")
+
+    metrics["firmware_burst_fpr"] = float(phase_frame.at["firmware_burst", "false_positive_rate"]) if "firmware_burst" in phase_frame.index else 0.0
+    metrics["udp_recall"] = float(phase_frame.at["udp_flood", "recall"]) if "udp_flood" in phase_frame.index else 0.0
+    metrics["syn_recall"] = float(phase_frame.at["syn_flood", "recall"]) if "syn_flood" in phase_frame.index else 0.0
+    return metrics
+
+
 def aggregate_metrics(results: pd.DataFrame, group_cols: Iterable[str]) -> pd.DataFrame:
-    metric_columns = ["accuracy", "precision", "recall", "false_positive_rate", "f1"]
+    metric_columns = [
+        "accuracy",
+        "precision",
+        "recall",
+        "false_positive_rate",
+        "f1",
+        "firmware_burst_fpr",
+        "udp_recall",
+        "syn_recall",
+    ]
     grouped = results.groupby(list(group_cols))[metric_columns].agg(["mean", "std"]).reset_index()
     grouped.columns = [
         "_".join(part for part in column if part).rstrip("_") if isinstance(column, tuple) else column
@@ -78,6 +97,8 @@ def sweep_thresholds(
     calibration_seconds: int,
     feature_subset,
     kofn_k: int,
+    min_alert_windows: int,
+    cooldown_windows: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     tprs = []
     fprs = []
@@ -94,6 +115,8 @@ def sweep_thresholds(
             calibration_seconds=calibration_seconds,
             feature_subset=feature_subset,
             kofn_k=kofn_k,
+            min_alert_windows=min_alert_windows,
+            cooldown_windows=cooldown_windows,
         )
         metrics = evaluate(detections["prediction"], truth)
         tprs.append(metrics["recall"])

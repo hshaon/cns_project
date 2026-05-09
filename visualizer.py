@@ -80,16 +80,24 @@ def _bar_plot(
 
 def plot_detector_comparison(summary_metrics: pd.DataFrame, output_path: str) -> None:
     frame = summary_metrics[summary_metrics["feature_set"] == "full"]
-    _bar_plot(
-        frame=frame,
-        x_col="detector_mode",
-        y_col="recall_mean",
-        hue_col="rule_mode",
-        output_path=output_path,
-        title="Detector Comparison",
-        ylabel="Mean Recall",
-        yerr_col="recall_std",
+    ordered = frame.sort_values("config_name")
+    axis = ordered.plot(
+        x="config_name",
+        y="recall_mean",
+        kind="bar",
+        yerr="recall_std",
+        capsize=4,
+        figsize=(8, 5),
+        legend=False,
     )
+    axis.set_title("Detector Comparison")
+    axis.set_xlabel("Configuration")
+    axis.set_ylabel("Mean Recall")
+    axis.grid(True, axis="y", alpha=0.3)
+    plt.xticks(rotation=0)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
 
 
 def plot_phase_metrics(phase_metrics_frame: pd.DataFrame, output_path: str) -> None:
@@ -120,13 +128,22 @@ def plot_phase_metrics(phase_metrics_frame: pd.DataFrame, output_path: str) -> N
 def plot_multi_seed_summary(summary_metrics: pd.DataFrame, output_path: str) -> None:
     frame = summary_metrics[summary_metrics["feature_set"] == "full"]
     melted = frame.melt(
-        id_vars=["detector_mode", "rule_mode"],
-        value_vars=["accuracy_mean", "precision_mean", "recall_mean", "false_positive_rate_mean", "f1_mean"],
+        id_vars=["config_name"],
+        value_vars=[
+            "accuracy_mean",
+            "precision_mean",
+            "recall_mean",
+            "false_positive_rate_mean",
+            "f1_mean",
+            "firmware_burst_fpr_mean",
+            "udp_recall_mean",
+            "syn_recall_mean",
+        ],
         var_name="metric",
         value_name="value",
     )
     melted["metric"] = melted["metric"].str.replace("_mean", "", regex=False)
-    melted["config"] = melted["detector_mode"] + " / " + melted["rule_mode"]
+    melted["config"] = melted["config_name"]
 
     axis = melted.pivot(index="metric", columns="config", values="value").plot(kind="bar", figsize=(10, 5))
     axis.set_title("Multi-Seed Metric Summary")
@@ -151,3 +168,61 @@ def plot_ablation_comparison(ablation_metrics: pd.DataFrame, output_path: str) -
         title="Feature Ablation Comparison",
         ylabel="Mean Value",
     )
+
+
+def plot_final_tradeoff_bars(summary_metrics: pd.DataFrame, output_path: str) -> None:
+    frame = summary_metrics[summary_metrics["feature_set"] == "full"].copy().sort_values("config_name")
+    metric_columns = [
+        "recall_mean",
+        "f1_mean",
+        "false_positive_rate_mean",
+        "firmware_burst_fpr_mean",
+    ]
+    metric_labels = {
+        "recall_mean": "Recall",
+        "f1_mean": "F1",
+        "false_positive_rate_mean": "FPR",
+        "firmware_burst_fpr_mean": "Burst FPR",
+    }
+
+    plot_frame = frame[["config_name", *metric_columns]].rename(columns=metric_labels).set_index("config_name")
+    axis = plot_frame.plot(kind="bar", figsize=(10, 5.5))
+    axis.set_title("Final Detector Tradeoff")
+    axis.set_xlabel("Configuration")
+    axis.set_ylabel("Mean Value")
+    axis.grid(True, axis="y", alpha=0.3)
+    plt.xticks(rotation=0)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
+def plot_final_phase_breakdown(summary_metrics: pd.DataFrame, output_path: str) -> None:
+    frame = summary_metrics[summary_metrics["feature_set"] == "full"][
+        ["config_name", "firmware_burst_fpr_mean", "udp_recall_mean", "syn_recall_mean"]
+    ].copy()
+    melted = frame.melt(
+        id_vars=["config_name"],
+        value_vars=["firmware_burst_fpr_mean", "udp_recall_mean", "syn_recall_mean"],
+        var_name="metric",
+        value_name="value",
+    )
+    metric_labels = {
+        "firmware_burst_fpr_mean": "Burst FPR",
+        "udp_recall_mean": "UDP Recall",
+        "syn_recall_mean": "SYN Recall",
+    }
+    melted["metric"] = melted["metric"].map(metric_labels)
+
+    axis = melted.pivot(index="config_name", columns="metric", values="value").plot(
+        kind="bar",
+        figsize=(9, 5),
+    )
+    axis.set_title("Final Phase-Specific Breakdown")
+    axis.set_xlabel("Configuration")
+    axis.set_ylabel("Mean Value")
+    axis.grid(True, axis="y", alpha=0.3)
+    plt.xticks(rotation=0)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
